@@ -35,8 +35,8 @@ Windows 路径同样为：`C:\Users\<你>\.local\share\mimocode\mimocode.db`
 ## 快速开始
 
 ```bash
-git clone https://github.com/<your-username>/<repo-name>.git
-cd <repo-name>
+git clone https://github.com/b0bcx/mimo-token-statistics.git
+cd mimo-token-statistics
 
 # 默认 http://127.0.0.1:8765
 python server.py
