@@ -653,8 +653,9 @@ html[data-theme="dark"] #btn-theme .ic-moon { display: none; }
   padding: 10px 12px;
   font-size: 12px;
   min-width: 160px;
+  max-width: min(320px, calc(100vw - 24px));
   color: var(--text);
-  transform: translate(-50%, -110%);
+  /* 定位完全由 JS 控制，避免 translate(-50%) 在边缘被裁切 */
 }
 .tt-title { font-weight: 700; margin-bottom: 6px; }
 .tt-row {
@@ -664,7 +665,17 @@ html[data-theme="dark"] #btn-theme .ic-moon { display: none; }
   color: var(--text-2);
   font-variant-numeric: tabular-nums;
 }
-.tt-row strong { color: var(--text); font-weight: 600; }
+.tt-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tt-row strong {
+  color: var(--text);
+  font-weight: 600;
+  flex-shrink: 0;
+}
 
 /* ── Mid grids ───────────────────────────────────────────── */
 .top-grid {

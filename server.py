@@ -1147,6 +1147,188 @@ def get_day_hourly(date_str: str) -> Dict[str, Any]:
     return result
 
 
+def aggregate_dates_ranks(dates: List[str]) -> Dict[str, Any]:
+    """按选中日期聚合模型 / 项目 / 会话排行（热力图多选联动）。"""
+    day_set = set(dates)
+    if not day_set:
+        return {"by_model": [], "by_project": [], "by_session": []}
+
+    items = [it for it in load_full_items() if day_key(it["time"]) in day_set]
+
+    model_agg: Dict[str, Dict[str, int]] = defaultdict(new_mstat)
+    model_last: Dict[str, int] = {}
+    sess_agg: Dict[str, Dict[str, Any]] = {}
+    proj_agg: Dict[str, Dict[str, Any]] = {}
+    total = 0
+
+    for it in items:
+        t = it["total"]
+        total += t
+        mid = it["model"]
+        bump_mstat(model_agg[mid], it, t)
+        model_last[mid] = max(model_last.get(mid, 0), it["time"])
+
+        sid = it["session_id"]
+        if sid:
+            s = sess_agg.setdefault(
+                sid,
+                {
+                    "id": sid,
+                    "title": it["title"],
+                    "directory": it["directory"],
+                    "project_name": it["project_name"],
+                    **new_mstat(),
+                    "last": 0,
+                    "models": defaultdict(int),
+                },
+            )
+            bump_mstat(s, it, t)
+            s["last"] = max(s["last"], it["time"])
+            s["models"][mid] += t
+            if it["title"] and len(it["title"]) > len(s["title"] or ""):
+                s["title"] = it["title"]
+
+        pkey = it["project_name"] or "(未分配目录)"
+        p = proj_agg.setdefault(
+            pkey,
+            {
+                "name": pkey,
+                "path": it["directory"] if pkey != "(未分配目录)" else "",
+                **new_mstat(),
+                "last": 0,
+                "sessions": set(),
+                "model_stats": defaultdict(new_mstat),
+            },
+        )
+        bump_mstat(p, it, t)
+        p["output"] += it.get("reasoning", 0)
+        p["last"] = max(p["last"], it["time"])
+        if sid:
+            p["sessions"].add(sid)
+        bump_mstat(p["model_stats"][mid], it, t)
+
+    by_model = []
+    for mid, st in sorted(model_agg.items(), key=lambda x: -x[1]["tokens"]):
+        top_sess = []
+        for sid, s in sess_agg.items():
+            mt = s["models"].get(mid, 0)
+            if mt > 0:
+                top_sess.append(
+                    {
+                        "id": sid,
+                        "title": (s["title"] or sid)[:60],
+                        "tokens": mt,
+                        "fmt": format_token_lx(mt),
+                        "project_name": s["project_name"],
+                        "share": round(mt / s["tokens"] * 100, 1) if s["tokens"] else 0,
+                    }
+                )
+        top_sess.sort(key=lambda x: -x["tokens"])
+        turns = st["turns"] or 0
+        by_model.append(
+            {
+                "model": mid,
+                "tokens": st["tokens"],
+                "fmt": format_token_lx(st["tokens"]),
+                "share": round(st["tokens"] / total * 100, 1) if total else 0,
+                "turns": turns,
+                "avg": round(st["tokens"] / turns) if turns else 0,
+                "avg_fmt": format_token_lx(st["tokens"] / turns) if turns else "0",
+                "input": st["input"],
+                "output": st["output"] + st["reasoning"],
+                "reasoning": st["reasoning"],
+                "cache": st["cache_read"] + st["cache_write"],
+                "cache_hit": cache_hit_rate(st["cache_read"], st["cache_write"], st["input"]),
+                "sessions": len(top_sess),
+                "last": model_last.get(mid, 0),
+                "last_label": datetime.fromtimestamp(model_last.get(mid, 0) / 1000).strftime("%m-%d %H:%M")
+                if model_last.get(mid)
+                else "",
+                "top_sessions": top_sess[:8],
+            }
+        )
+
+    by_session = []
+    for sid, s in sorted(sess_agg.items(), key=lambda x: -x[1]["tokens"])[:50]:
+        turns = s["turns"] or 0
+        models = [
+            {"model": mid, "tokens": mt, "share": round(mt / s["tokens"] * 100, 1) if s["tokens"] else 0}
+            for mid, mt in sorted(s["models"].items(), key=lambda x: -x[1])
+        ]
+        by_session.append(
+            {
+                "id": sid,
+                "title": (s["title"] or sid)[:80],
+                "directory": s["directory"],
+                "project_name": s["project_name"],
+                "tokens": s["tokens"],
+                "fmt": format_token_lx(s["tokens"]),
+                "share": round(s["tokens"] / total * 100, 1) if total else 0,
+                "turns": turns,
+                "last": s["last"],
+                "last_label": datetime.fromtimestamp(s["last"] / 1000).strftime("%m-%d %H:%M") if s["last"] else "",
+                "input": s["input"],
+                "output": s["output"] + s["reasoning"],
+                "cache": s["cache_read"] + s["cache_write"],
+                "avg": round(s["tokens"] / turns) if turns else 0,
+                "avg_fmt": format_token_lx(s["tokens"] / turns) if turns else "0",
+                "cache_hit": cache_hit_rate(s["cache_read"], s["cache_write"], s["input"]),
+                "models": models[:4],
+            }
+        )
+    max_sess = by_session[0]["tokens"] if by_session else 1
+    for s in by_session:
+        s["pct"] = round(s["tokens"] / max_sess * 100) if max_sess else 0
+
+    by_project = []
+    for pkey, p in sorted(proj_agg.items(), key=lambda x: -x[1]["tokens"])[:30]:
+        turns = p["turns"] or 0
+        models = [pack_mstat(mid, st, p["tokens"]) for mid, st in sorted(p["model_stats"].items(), key=lambda x: -x[1]["tokens"])]
+        top_sess = []
+        for sid, s in sess_agg.items():
+            if s["project_name"] == p["name"] or (p["path"] and s["directory"] == p["path"]):
+                top_sess.append(
+                    {
+                        "id": sid,
+                        "title": (s["title"] or sid)[:60],
+                        "tokens": s["tokens"],
+                        "fmt": format_token_lx(s["tokens"]),
+                        "turns": s["turns"],
+                        "models": [
+                            {"model": mid, "tokens": mt, "share": round(mt / s["tokens"] * 100, 1) if s["tokens"] else 0}
+                            for mid, mt in sorted(s["models"].items(), key=lambda x: -x[1])[:3]
+                        ],
+                    }
+                )
+        top_sess.sort(key=lambda x: -x["tokens"])
+        by_project.append(
+            {
+                "name": p["name"],
+                "path": p["path"],
+                "tokens": p["tokens"],
+                "fmt": format_token_lx(p["tokens"]),
+                "share": round(p["tokens"] / total * 100, 1) if total else 0,
+                "turns": turns,
+                "sessions": len(p["sessions"]),
+                "input": p["input"],
+                "output": p["output"],
+                "cache": p["cache_read"] + p["cache_write"],
+                "avg": round(p["tokens"] / turns) if turns else 0,
+                "avg_fmt": format_token_lx(p["tokens"] / turns) if turns else "0",
+                "cache_hit": cache_hit_rate(p["cache_read"], p["cache_write"], p["input"]),
+                "last": p["last"],
+                "last_label": datetime.fromtimestamp(p["last"] / 1000).strftime("%m-%d %H:%M") if p["last"] else "",
+                "models": models,
+                "top_sessions": top_sess[:8],
+            }
+        )
+    max_proj = by_project[0]["tokens"] if by_project else 1
+    for p in by_project:
+        p["pct"] = round(p["tokens"] / max_proj * 100) if max_proj else 0
+
+    return {"by_model": by_model, "by_project": by_project, "by_session": by_session}
+
+
 def get_days_hourly(dates: List[str]) -> Dict[str, Any]:
     """多天合并后的 24 小时分模型用量（Shift 多选日历）。"""
     dates = [d for d in dates if d]
@@ -1261,6 +1443,7 @@ def get_days_hourly(dates: List[str]) -> Dict[str, Any]:
         "hourly_models": top_models + ["其他"],
         "peak_hour": max(hourly, key=lambda x: x["tokens"])["hour"] if any(h["tokens"] for h in hourly) else None,
     }
+    result.update(aggregate_dates_ranks(sorted(set(dates[:32]))))
     cache_set(cache_key, result)
     return result
 

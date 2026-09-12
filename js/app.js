@@ -5,6 +5,41 @@
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
+  function systemTheme() {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+
+  function readStoredDays() {
+    const raw = sessionStorage.getItem("mimo-ts-days") || "";
+    return raw ? raw.split(",").filter(Boolean) : [];
+  }
+
+  function readStoredHours() {
+    const raw = sessionStorage.getItem("mimo-ts-hours") || "";
+    return raw
+      ? raw
+          .split(",")
+          .map((x) => Number(x))
+          .filter((x) => Number.isFinite(x))
+      : [];
+  }
+
+  function persistDaySelection() {
+    if (state.selectedDayDates.length) {
+      sessionStorage.setItem("mimo-ts-days", state.selectedDayDates.join(","));
+    } else {
+      sessionStorage.removeItem("mimo-ts-days");
+    }
+  }
+
+  function persistHourSelection() {
+    if (state.selectedHours.length) {
+      sessionStorage.setItem("mimo-ts-hours", state.selectedHours.join(","));
+    } else {
+      sessionStorage.removeItem("mimo-ts-hours");
+    }
+  }
+
   const state = {
     range: localStorage.getItem("mimo-ts-range") || "7",
     data: null,
@@ -20,15 +55,43 @@
     projectLimit: Number(localStorage.getItem("mimo-ts-project-limit") || 5),
     modelSort: localStorage.getItem("mimo-ts-model-sort") || "tokens",
     projectSort: localStorage.getItem("mimo-ts-project-sort") || "tokens",
-    theme: localStorage.getItem("mimo-ts-theme") || "light",
-    selectedDayDates: [],
-    selectedHours: [],
+    theme: localStorage.getItem("mimo-ts-theme") || systemTheme(),
+    selectedDayDates: readStoredDays(),
+    selectedHours: readStoredHours(),
     hourlyDay: null,
     hourlyReqId: 0,
     hourlySig: "",
-    openModel: null,
-    openProject: null,
+    openModel: sessionStorage.getItem("mimo-ts-open-model") || null,
+    openProject: sessionStorage.getItem("mimo-ts-open-project") || null,
+    // 当前列表展示所用的数据源（区间 or 选中日期）
+    rankModels: null,
+    rankProjects: null,
   };
+
+  function persistOpenRanks() {
+    if (state.openModel) sessionStorage.setItem("mimo-ts-open-model", state.openModel);
+    else sessionStorage.removeItem("mimo-ts-open-model");
+    if (state.openProject) sessionStorage.setItem("mimo-ts-open-project", state.openProject);
+    else sessionStorage.removeItem("mimo-ts-open-project");
+  }
+
+  function setOpenModel(name) {
+    state.openModel = name;
+    persistOpenRanks();
+  }
+
+  function setOpenProject(name) {
+    state.openProject = name;
+    persistOpenRanks();
+  }
+
+  function currentRankModels() {
+    return state.rankModels || state.data?.by_model || [];
+  }
+
+  function currentRankProjects() {
+    return state.rankProjects || state.data?.by_project || [];
+  }
 
   // softer palette, closer to rank bars / not neon
   const MODEL_COLORS = ["#ff6a00", "#5b8def", "#3a9e9e", "#8b6fc7", "#4f9e6e", "#7a8798"];
@@ -112,6 +175,15 @@
     applyTheme();
   }
 
+  // 未手动选择主题时，跟随系统深浅色变化
+  try {
+    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => {
+      if (localStorage.getItem("mimo-ts-theme")) return;
+      state.theme = e.matches ? "dark" : "light";
+      applyTheme();
+    });
+  } catch (_) {}
+
   // ── API ───────────────────────────────────────────────────
   async function fetchJSON(url) {
     const res = await fetch(url, { cache: "no-store" });
@@ -191,10 +263,23 @@
     if (!tip) return;
     tip.hidden = false;
     tip.innerHTML = html;
-    const x = ev.clientX;
-    const y = ev.clientY;
-    tip.style.left = Math.min(window.innerWidth - 110, Math.max(110, x)) + "px";
-    tip.style.top = Math.max(100, y - 8) + "px";
+    tip.style.transform = "none";
+
+    const rect = tip.getBoundingClientRect();
+    const pad = 12;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    // 默认在指针上方水平居中；靠边时向内收，避免被视口裁切
+    let left = ev.clientX - rect.width / 2;
+    if (left + rect.width > vw - pad) left = vw - pad - rect.width;
+    if (left < pad) left = pad;
+
+    let top = ev.clientY - rect.height - 10;
+    if (top < pad) top = Math.min(ev.clientY + 16, vh - rect.height - pad);
+
+    tip.style.left = Math.round(left) + "px";
+    tip.style.top = Math.round(Math.max(pad, top)) + "px";
   }
 
   function hideTooltip() {
@@ -225,26 +310,27 @@
   function renderAll(data) {
     renderKPI(data);
     renderDailyChart(data);
-    // 已选中日历时，时段活跃由该日数据驱动，避免自动刷新时闪回区间汇总
+    // 已选中日历时，时段活跃 / 排行由选中日期驱动，避免自动刷新时闪回区间汇总
     if (!state.selectedDayDates.length) {
       animateHourly(() => renderHourly(data));
       const hsub0 = $("#hourly-sub");
       if (hsub0) hsub0.textContent = `${data.range_label || ""} · 按小时`;
+      renderModels(data.by_model || []);
+      renderProjects(data.by_project || []);
+      populateModelFilter(data);
+      state.sessions = data.by_session || [];
+      renderSessions();
+      const msub0 = $("#models-sub");
+      const psub0 = $("#projects-sub");
+      const ssub0 = $("#sessions-sub");
+      if (msub0) msub0.textContent = data.range_label || "";
+      if (psub0) psub0.textContent = data.range_label || "";
+      if (ssub0) ssub0.textContent = data.range_label || "";
     }
-    renderModels(data.by_model || []);
-    renderProjects(data.by_project || []);
-    populateModelFilter(data);
-    renderSessions();
     renderInsights(data);
 
     const sub = $("#chart-sub");
     if (sub) sub.textContent = `最近 ${data.heat_days || data.chart_days} 天`;
-    const msub = $("#models-sub");
-    if (msub) msub.textContent = data.range_label || "";
-    const psub = $("#projects-sub");
-    if (psub) psub.textContent = data.range_label || "";
-    const ssub = $("#sessions-sub");
-    if (ssub) ssub.textContent = data.range_label || "";
 
     const ft = $("#footer-time");
     if (ft) {
@@ -370,6 +456,7 @@
           else list.push(d.date);
           list.sort();
           state.selectedDayDates = list;
+          persistDaySelection();
           el.querySelectorAll(".hm-cell").forEach((c) =>
             c.classList.toggle("selected", state.selectedDayDates.includes(c.dataset.date))
           );
@@ -383,10 +470,11 @@
           return;
         }
         state.selectedDayDates = [d.date];
+        persistDaySelection();
         el.querySelectorAll(".hm-cell").forEach((c) =>
           c.classList.toggle("selected", c.dataset.date === d.date)
         );
-        showDayDetail(d);
+        applyDaySelection();
       });
     });
 
@@ -472,26 +560,50 @@
     bindDayDetailHover(modelsEl);
   }
 
-  function showDayDetail(d) {
-    if (!d) return;
-    renderDayDetailPanel(d, `${d.date}${d.is_today ? " · 今天" : ""}`);
-    syncHourlyForDays([d.date]);
-  }
-
   function applyDaySelection() {
     const dates = state.selectedDayDates.slice();
     if (!dates.length) {
       closeDayDetail();
       return;
     }
-    if (dates.length === 1) {
-      const d = (state.data?.heatmap_weeks || [])
-        .flat()
-        .find((x) => x && x.date === dates[0]);
-      if (d) showDayDetail(d);
-      return;
-    }
     syncDaysDetail(dates);
+  }
+
+  function selectionLabel(dates) {
+    if (dates.length === 1) return dates[0];
+    if (dates.length <= 3) return dates.join(", ");
+    return `${dates[0]} … ${dates[dates.length - 1]} · ${dates.length} 天`;
+  }
+
+  function restoreRangeRanks() {
+    const data = state.data;
+    if (!data) return;
+    renderModels(data.by_model || []);
+    renderProjects(data.by_project || []);
+    populateModelFilter(data);
+    state.sessions = data.by_session || [];
+    renderSessions();
+    const msub = $("#models-sub");
+    const psub = $("#projects-sub");
+    const ssub = $("#sessions-sub");
+    if (msub) msub.textContent = data.range_label || "";
+    if (psub) psub.textContent = data.range_label || "";
+    if (ssub) ssub.textContent = data.range_label || "";
+  }
+
+  function applySelectedDayRanks(d) {
+    const label = selectionLabel(state.selectedDayDates);
+    renderModels(d.by_model || []);
+    renderProjects(d.by_project || []);
+    populateModelFilter({ by_model: d.by_model || [], by_project: d.by_project || [] });
+    state.sessions = d.by_session || [];
+    renderSessions();
+    const msub = $("#models-sub");
+    const psub = $("#projects-sub");
+    const ssub = $("#sessions-sub");
+    if (msub) msub.textContent = label;
+    if (psub) psub.textContent = label;
+    if (ssub) ssub.textContent = label;
   }
 
   async function syncDaysDetail(dates) {
@@ -500,7 +612,8 @@
     const dateEl = $("#day-detail-date");
     const statsEl = $("#day-detail-stats");
     const modelsEl = $("#day-detail-models");
-    if (dateEl) dateEl.textContent = `${dates.join(", ")} · ${dates.length} 天`;
+    const label = selectionLabel(dates);
+    if (dateEl) dateEl.textContent = dates.length === 1 ? dates[0] : `${dates.join(", ")} · ${dates.length} 天`;
     if (statsEl) statsEl.innerHTML = `<div style="color:var(--text-3);font-size:12px">汇总中…</div>`;
     if (modelsEl) modelsEl.innerHTML = "";
     const reqId = ++state.hourlyReqId;
@@ -520,10 +633,10 @@
           cache: d.cache,
           models: d.models,
         },
-        `${dates.join(", ")} · ${dates.length} 天`
+        dates.length === 1 ? dates[0] : `${dates.join(", ")} · ${dates.length} 天`
       );
       const hsub = $("#hourly-sub");
-      if (hsub) hsub.textContent = `${dates.join(", ")} · 按小时`;
+      if (hsub) hsub.textContent = `${label} · 按小时`;
       animateHourly(() =>
         renderHourly({
           hourly: d.hourly || [],
@@ -536,6 +649,8 @@
           },
         })
       );
+      // 模型 / 项目 / 会话跟随选中日期
+      applySelectedDayRanks(d);
     } catch (_) {}
   }
 
@@ -553,9 +668,11 @@
 
   function closeDayDetail() {
     state.selectedDayDates = [];
+    persistDaySelection();
     const box = $("#day-detail");
     closeDetailPanel(box);
     $$(".hm-cell.selected").forEach((c) => c.classList.remove("selected"));
+    restoreRangeRanks();
     syncHourlyForDays(null);
   }
 
@@ -675,6 +792,7 @@
           else list.push(h);
           list.sort((a, b) => a - b);
           state.selectedHours = list;
+          persistHourSelection();
           el.querySelectorAll(".hour-col").forEach((c) =>
             c.classList.toggle("selected", state.selectedHours.includes(Number(c.dataset.hour)))
           );
@@ -687,6 +805,7 @@
           return;
         }
         state.selectedHours = [h];
+        persistHourSelection();
         el.querySelectorAll(".hour-col").forEach((c) =>
           c.classList.toggle("selected", Number(c.dataset.hour) === h)
         );
@@ -908,6 +1027,7 @@
 
   function closeHourDetail() {
     state.selectedHours = [];
+    persistHourSelection();
     const box = $("#hour-detail");
     closeDetailPanel(box);
     $$(".hour-col.selected").forEach((c) => c.classList.remove("selected"));
@@ -976,6 +1096,7 @@
   function renderModels(models) {
     const el = $("#model-list");
     if (!el) return;
+    state.rankModels = models;
     if (!models.length) {
       el.innerHTML = `<div style="color:var(--text-3);font-size:12px;padding:16px 0">暂无数据</div>`;
       return;
@@ -1037,6 +1158,7 @@
   function renderProjects(projects) {
     const el = $("#project-list");
     if (!el) return;
+    state.rankProjects = projects;
     if (!projects.length) {
       el.innerHTML = `<div style="color:var(--text-3);font-size:12px;padding:16px 0">暂无数据</div>`;
       return;
@@ -1109,22 +1231,22 @@
       const toggle = () => {
         hideHoverCard();
         if (kind === "model") {
-          state.openModel = state.openModel === name ? null : name;
-          renderModels(state.data?.by_model || []);
+          setOpenModel(state.openModel === name ? null : name);
+          renderModels(currentRankModels());
         } else {
-          state.openProject = state.openProject === name ? null : name;
-          renderProjects(state.data?.by_project || []);
+          setOpenProject(state.openProject === name ? null : name);
+          renderProjects(currentRankProjects());
         }
       };
       row.addEventListener("click", (e) => {
         if (e.target.closest("[data-collapse]")) {
           hideHoverCard();
           if (kind === "model") {
-            state.openModel = null;
-            renderModels(state.data?.by_model || []);
+            setOpenModel(null);
+            renderModels(currentRankModels());
           } else {
-            state.openProject = null;
-            renderProjects(state.data?.by_project || []);
+            setOpenProject(null);
+            renderProjects(currentRankProjects());
           }
           return;
         }
@@ -1427,11 +1549,13 @@
   function setRange(range) {
     state.range = range;
     localStorage.setItem("mimo-ts-range", range);
-    state.openModel = null;
-    state.openProject = null;
+    setOpenModel(null);
+    setOpenProject(null);
     // 切范围时清掉日历选中，避免时段活跃在「区间汇总 / 单日」之间来回闪
     state.selectedDayDates = [];
     state.selectedHours = [];
+    persistDaySelection();
+    persistHourSelection();
     state.hourlyDay = null;
     state.hourlyReqId += 1;
     const dayBox = $("#day-detail");
@@ -1630,10 +1754,10 @@
         }
         if ($("#drawer")?.classList.contains("open")) closeDrawer();
         else if (state.openModel || state.openProject) {
-          state.openModel = null;
-          state.openProject = null;
-          renderModels(state.data?.by_model || []);
-          renderProjects(state.data?.by_project || []);
+          setOpenModel(null);
+          setOpenProject(null);
+          renderModels(currentRankModels());
+          renderProjects(currentRankProjects());
         } else closeDayDetail();
       }
       if (e.key === "r" || e.key === "R") {

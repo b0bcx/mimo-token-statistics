@@ -1,10 +1,22 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#f3f5f8" />
   <title>MiMo Token 统计</title>
+  <script>
+    // 首屏主题：优先用户选择，否则跟随系统，避免闪一下默认色
+    (function () {
+      var t = localStorage.getItem("mimo-ts-theme");
+      if (!t) t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      document.documentElement.setAttribute("data-theme", t);
+      document.querySelector('meta[name="theme-color"]')?.setAttribute(
+        "content",
+        t === "light" ? "#f3f5f8" : "#0b1017"
+      );
+    })();
+  </script>
   <link rel="stylesheet" href="/css/style.css" />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23FF6A00'/%3E%3Cpath d='M8 22V10l5 7 5-7 5 12' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
 </head>
