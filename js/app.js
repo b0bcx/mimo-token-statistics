@@ -186,7 +186,11 @@
 
   // ── API ───────────────────────────────────────────────────
   async function fetchJSON(url) {
-    const res = await fetch(url, { cache: "no-store" });
+    const res = await fetch(url, { cache: "no-store", credentials: "same-origin" });
+    if (res.status === 401) {
+      if (!location.pathname.startsWith("/login")) location.href = "/login";
+      throw new Error("需要登录");
+    }
     if (!res.ok) {
       let msg = "HTTP " + res.status;
       try {
@@ -223,13 +227,13 @@
     // 先预热最重的 all，再其它轻量范围
     if (state.range !== "all") {
       try {
-        await fetch(`/api/overview?range=all`, { cache: "no-store" });
+        await fetch(`/api/overview?range=all`, { cache: "no-store", credentials: "same-origin" });
       } catch (_) {}
     }
     const light = ["7", "14", "30", "today", "90"].filter((r) => r !== state.range);
     for (const r of light) {
       try {
-        await fetch(`/api/overview?range=${r}`, { cache: "no-store" });
+        await fetch(`/api/overview?range=${r}`, { cache: "no-store", credentials: "same-origin" });
       } catch (_) {}
     }
   }
@@ -1641,7 +1645,7 @@
 
     $("#btn-refresh")?.addEventListener("click", async () => {
       try {
-        await fetch("/api/refresh");
+        await fetch("/api/refresh", { credentials: "same-origin" });
       } catch (_) {}
       loadOverview();
     });
@@ -1761,7 +1765,7 @@
         } else closeDayDetail();
       }
       if (e.key === "r" || e.key === "R") {
-        fetch("/api/refresh").then(() => loadOverview()).catch(() => loadOverview());
+        fetch("/api/refresh", { credentials: "same-origin" }).then(() => loadOverview()).catch(() => loadOverview());
       }
       const map = { "1": "today", "2": "7", "3": "14", "4": "30", "5": "90", "6": "all" };
       if (map[e.key]) setRange(map[e.key]);

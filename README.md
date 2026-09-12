@@ -20,6 +20,7 @@
 - **洞察卡片**：峰值日、日均消耗、最耗模型、最耗项目（随时间范围变化）
 - **CSV 导出**、主题默认**跟随系统**（可手动切换并记住）、在线时 15 秒自动刷新（可暂停；快捷键 `R` 立即刷新）
 - 响应式布局：窄屏热力图横向滚动并默认露出最近日期；会话表在手机上隐藏项目列、筛选分行
+- **访问密码**：默认 `root`，支持局域网 / 内网穿透场景
 - 右上角「i」可查看**数据说明**与统计口径
 
 > 术语：界面中的「请求」为带 tokens 的 assistant 消息次数；「次均」= 该范围内总消耗 ÷ 请求次数。
@@ -36,21 +37,51 @@ Windows 路径同样为：`C:\Users\<你>\.local\share\mimocode\mimocode.db`
 
 ## 快速开始
 
+### 方式一：GitHub Releases（无需安装 Git）
+
+1. 打开 [Releases](https://github.com/b0bcx/mimo-token-statistics/releases) 下载最新 Source code zip
+2. 解压后进入目录
+3. 运行：
+
+```bash
+python server.py
+```
+
+Windows 可双击 `启动统计服务.bat`。
+
+### 方式二：git clone
+
 ```bash
 git clone https://github.com/b0bcx/mimo-token-statistics.git
 cd mimo-token-statistics
 
-# 默认 http://127.0.0.1:8765
+# 默认 http://0.0.0.0:8765（本机可用 http://127.0.0.1:8765）
 python server.py
 
 # 或
-python server.py --port 8765 --host 127.0.0.1
+python server.py --port 8765 --host 0.0.0.0 --password root
 python server.py --db "/path/to/mimocode.db"
+python server.py --no-auth
 ```
 
 Windows 可双击 `启动统计服务.bat`；结束时可用 `停止统计服务.bat`。
 
-浏览器打开：http://127.0.0.1:8765
+浏览器打开：http://127.0.0.1:8765  
+
+首次访问会进入登录页，**默认密码：`root`**。可用 `--password 你的密码` 或环境变量 `MIMO_STATS_PASSWORD` 修改。
+
+## 访问控制
+
+| 项 | 说明 |
+|----|------|
+| 默认监听 | `0.0.0.0`（本机 + 局域网；有公网 IP / 内网穿透时也可对外） |
+| 默认密码 | `root` |
+| 改密码 | `python server.py --password 强口令` 或设 `MIMO_STATS_PASSWORD` |
+| 临时关闭鉴权 | `python server.py --no-auth`（仅建议本机使用） |
+| 会话 | 登录成功后下发 HttpOnly Cookie，约 30 天有效 |
+
+> 公网部署前请务必修改默认密码；本工具不是专业鉴权网关，建议再套一层反向代理 TLS / 防火墙 / IP 白名单。
+
 
 ## 统计口径
 
@@ -76,7 +107,11 @@ Windows 可双击 `启动统计服务.bat`；结束时可用 `停止统计服务
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/` | 看板页面 |
+| GET | `/` | 看板页面（需登录） |
+| GET | `/login` | 登录页 |
+| POST | `/api/login` | 登录。JSON：`{"password":"..."}`；成功下发 Cookie |
+| POST | `/api/logout` | 注销当前会话 |
+| GET | `/api/auth` | 当前鉴权开关与是否已登录 |
 | GET | `/api/overview?range=` | 聚合统计。`range`: `today` \| `7` \| `14` \| `30` \| `90` \| `all`（别名 `/api/usage`） |
 | GET | `/api/day-hourly?date=` | 某日 24 小时分模型（日历联动） |
 | GET | `/api/days-hourly?dates=` | 多日合并小时分布，`dates` 为逗号分隔日期（Shift 多选） |
@@ -104,10 +139,12 @@ Windows 可双击 `启动统计服务.bat`；结束时可用 `停止统计服务
 
 ## 安全与隐私
 
-- 默认只监听 **`127.0.0.1`**，不暴露到局域网  
+- 默认监听 **`0.0.0.0`**，便于局域网 / 内网穿透访问；仅需本机时可用 `--host 127.0.0.1`
+- **默认启用访问密码**（`root`），未登录时看板与 `/api/*` 返回 401 并跳转登录页
 - 只读打开数据库，不修改 MiMo 客户端数据  
 - 主统计路径无网络上报；仅在显式访问 `/api/quota` 时可能读取本机 cookie 并请求小米接口  
 - **请勿**将真实 `mimocode.db` 或含个人用户名路径的截图提交到公开仓库  
+- 对外暴露前请修改默认密码，并尽量使用 HTTPS（反代 / 隧道 TLS）  
 
 ## 常见问题
 

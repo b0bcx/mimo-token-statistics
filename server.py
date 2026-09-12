@@ -11,16 +11,19 @@ Xiaomi MiMo Token Statistics
 
 用法:
   python server.py
-  python server.py --port 8765 --host 127.0.0.1
+  python server.py --port 8765 --host 0.0.0.0 --password root
+  python server.py --no-auth
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import hmac
 import io
 import json
 import os
+import secrets
 import sqlite3
 import sys
 import threading
@@ -47,6 +50,12 @@ COOKIE_CANDIDATES = [
 ]
 FRONTEND_ROOT = Path(__file__).resolve().parent
 DEFAULT_PORT = 8765
+DEFAULT_PASSWORD = "root"
+AUTH_COOKIE = "mimo_stats_auth"
+AUTH_ENABLED = True
+AUTH_PASSWORD = DEFAULT_PASSWORD
+_AUTH_TOKENS: set = set()
+_AUTH_LOCK = threading.Lock()
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -1587,6 +1596,136 @@ def health_status() -> Dict[str, Any]:
     }
 
 
+# ── auth ─────────────────────────────────────────────────────────────────────
+
+def _password_ok(candidate: str) -> bool:
+    return hmac.compare_digest(str(candidate or "").encode("utf-8"), AUTH_PASSWORD.encode("utf-8"))
+
+
+def issue_token() -> str:
+    tok = secrets.token_urlsafe(32)
+    with _AUTH_LOCK:
+        _AUTH_TOKENS.add(tok)
+    return tok
+
+
+def revoke_token(tok: str) -> None:
+    with _AUTH_LOCK:
+        _AUTH_TOKENS.discard(tok)
+
+
+def cookie_token(header: str) -> Optional[str]:
+    if not header:
+        return None
+    for part in header.split(";"):
+        k, _, v = part.strip().partition("=")
+        if k == AUTH_COOKIE and v:
+            return v
+    return None
+
+
+LOGIN_PAGE = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#f3f5f8" />
+  <title>登录 · MiMo Token Statistics</title>
+  <script>
+    (function () {
+      var t = localStorage.getItem("mimo-ts-theme");
+      if (!t) t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      document.documentElement.setAttribute("data-theme", t);
+      document.querySelector('meta[name="theme-color"]')?.setAttribute("content", t === "light" ? "#f3f5f8" : "#0b1017");
+    })();
+  </script>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f3f5f8; --panel: #fff; --ink: #152033; --muted: #667085;
+      --line: #e6ebf2; --accent: #ff6a00; --danger: #c0392b;
+    }
+    [data-theme="dark"] {
+      --bg: #0b1017; --panel: #121a24; --ink: #e8eef7; --muted: #8b97a8;
+      --line: #1e2a3a; --accent: #ff8a3d; --danger: #ff7b72;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center;
+      font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--ink); padding: 24px;
+    }
+    .card {
+      width: min(380px, 100%); background: var(--panel); border: 1px solid var(--line);
+      border-radius: 16px; padding: 28px 24px; box-shadow: 0 10px 40px rgba(15, 23, 42, 0.06);
+    }
+    .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
+    .mark {
+      width: 36px; height: 36px; border-radius: 10px; background: var(--accent);
+      display: grid; place-items: center; color: #fff; font-weight: 700;
+    }
+    h1 { font-size: 18px; margin: 0; font-weight: 650; }
+    .sub { color: var(--muted); font-size: 13px; margin: 2px 0 0; }
+    label { display: block; font-size: 13px; color: var(--muted); margin: 16px 0 6px; }
+    input[type="password"] {
+      width: 100%; height: 42px; border-radius: 10px; border: 1px solid var(--line);
+      background: transparent; color: var(--ink); padding: 0 12px; outline: none; font-size: 15px;
+    }
+    input[type="password"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(255,106,0,0.15); }
+    button {
+      width: 100%; margin-top: 18px; height: 42px; border: 0; border-radius: 10px;
+      background: var(--accent); color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
+    }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .err { color: var(--danger); font-size: 13px; min-height: 1.2em; margin-top: 10px; }
+    .hint { margin-top: 16px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <form class="card" id="f" autocomplete="current-password">
+    <div class="brand">
+      <div class="mark">M</div>
+      <div>
+        <h1>MiMo Token Statistics</h1>
+        <p class="sub">请输入访问密码</p>
+      </div>
+    </div>
+    <label for="p">密码</label>
+    <input id="p" name="password" type="password" required autofocus />
+    <div class="err" id="e" role="alert"></div>
+    <button type="submit" id="b">进入看板</button>
+    <div class="hint">默认密码为 <code>root</code>，可用 <code>--password</code> 修改。公网部署请务必改掉默认密码。</div>
+  </form>
+  <script>
+    document.getElementById("f").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById("b");
+      const err = document.getElementById("e");
+      btn.disabled = true; err.textContent = "";
+      try {
+        const res = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: document.getElementById("p").value }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.ok) {
+          location.replace("/");
+          return;
+        }
+        err.textContent = data.error || "密码错误";
+      } catch (_) {
+        err.textContent = "登录失败，请重试";
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
+"""
+
+
 # ── HTTP ─────────────────────────────────────────────────────────────────────
 
 class Handler(BaseHTTPRequestHandler):
@@ -1595,6 +1734,96 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
+
+    def _cookie_header(self, token: str, max_age: int = 60 * 60 * 24 * 30) -> str:
+        parts = [
+            f"{AUTH_COOKIE}={token}",
+            "Path=/",
+            "HttpOnly",
+            "SameSite=Lax",
+            f"Max-Age={max_age}",
+        ]
+        # 公网/HTTPS 场景下更安全；本地 http 会被忽略
+        if self.headers.get("X-Forwarded-Proto", "").lower() == "https":
+            parts.append("Secure")
+        return "; ".join(parts)
+
+    def _require_auth(self) -> bool:
+        if not AUTH_ENABLED:
+            return True
+        tok = cookie_token(self.headers.get("Cookie", ""))
+        if tok:
+            with _AUTH_LOCK:
+                if tok in _AUTH_TOKENS:
+                    return True
+        return False
+
+    def _redirect_login(self) -> None:
+        if self.path.startswith("/api/"):
+            self._json({"ok": False, "error": "unauthorized", "login": "/login"}, 401)
+            return
+        self.send_response(302)
+        self.send_header("Location", "/login")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _read_body_json(self) -> Dict[str, Any]:
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0 or length > 64 * 1024:
+            return {}
+        raw = self.rfile.read(length)
+        try:
+            data = json.loads(raw.decode("utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def do_POST(self) -> None:  # noqa: N802
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        try:
+            if path == "/api/login":
+                if not AUTH_ENABLED:
+                    self._json({"ok": True, "enabled": False})
+                    return
+                body = self._read_body_json()
+                pwd = body.get("password")
+                if pwd is None and self.headers.get("Content-Type", "").startswith("application/x-www-form-urlencoded"):
+                    form = dict(urllib.parse.parse_qsl(self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode("utf-8", "replace")))
+                    pwd = form.get("password")
+                if not _password_ok(str(pwd or "")):
+                    self._json({"ok": False, "error": "密码错误"}, 401)
+                    return
+                tok = issue_token()
+                body_b = json.dumps({"ok": True}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body_b)))
+                self.send_header("Set-Cookie", self._cookie_header(tok))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body_b)
+                return
+
+            if path == "/api/logout":
+                tok = cookie_token(self.headers.get("Cookie", ""))
+                if tok:
+                    revoke_token(tok)
+                body_b = json.dumps({"ok": True}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body_b)))
+                self.send_header("Set-Cookie", f"{AUTH_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body_b)
+                return
+
+            self._json({"ok": False, "error": "not found", "path": path}, 404)
+        except BrokenPipeError:
+            pass
+        except ConnectionResetError:
+            pass
 
     def _json(self, obj: Any, status: int = 200) -> None:
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -1643,9 +1872,14 @@ class Handler(BaseHTTPRequestHandler):
         qs = dict(urllib.parse.parse_qsl(parsed.query))
 
         try:
-            if path in ("/", "/index.html"):
-                self._file(FRONTEND_ROOT / "index.html")
+            if path == "/login":
+                self._text(LOGIN_PAGE, "text/html; charset=utf-8")
                 return
+
+            if path == "/api/auth":
+                self._json({"ok": True, "enabled": AUTH_ENABLED, "authed": self._require_auth()})
+                return
+
             if path.startswith("/assets/") or path.startswith("/css/") or path.startswith("/js/"):
                 rel = path.lstrip("/")
                 # prevent path traversal
@@ -1654,6 +1888,14 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": False, "error": "forbidden"}, 403)
                     return
                 self._file(target)
+                return
+
+            if not self._require_auth():
+                self._redirect_login()
+                return
+
+            if path in ("/", "/index.html"):
+                self._file(FRONTEND_ROOT / "index.html")
                 return
 
             if path == "/api/health" or path == "/api/status":
@@ -1744,13 +1986,23 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Xiaomi MiMo Token Statistics")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--host", type=str, default="127.0.0.1")
+    parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--db", type=str, default=None, help="自定义 mimocode.db 路径")
+    parser.add_argument(
+        "--password",
+        type=str,
+        default=os.environ.get("MIMO_STATS_PASSWORD", DEFAULT_PASSWORD),
+        help=f"访问密码（默认 {DEFAULT_PASSWORD}，可用环境变量 MIMO_STATS_PASSWORD）",
+    )
+    parser.add_argument("--no-auth", action="store_true", help="关闭访问密码（仅建议本机使用）")
     args = parser.parse_args()
 
-    global MIMO_DB_PATH
+    global MIMO_DB_PATH, AUTH_ENABLED, AUTH_PASSWORD
     if args.db:
         MIMO_DB_PATH = Path(args.db).expanduser().resolve()
+
+    AUTH_ENABLED = not args.no_auth
+    AUTH_PASSWORD = str(args.password or DEFAULT_PASSWORD)
 
     print("=" * 56)
     print("  Xiaomi MiMo Token Statistics")
@@ -1759,6 +2011,12 @@ def main() -> None:
     print(f"  状态   : {'已找到' if MIMO_DB_PATH.exists() else '未找到（请确认 MiMo Desktop 已使用过）'}")
     print(f"  前端   : {FRONTEND_ROOT / 'index.html'}")
     print(f"  地址   : http://{args.host}:{args.port}/")
+    if AUTH_ENABLED:
+        print(f"  密码   : 已启用（{os.environ.get('MIMO_STATS_PASSWORD') and '环境变量' or '--password/默认'}）")
+        if AUTH_PASSWORD == DEFAULT_PASSWORD and args.host in ("0.0.0.0", "::"):
+            print("  警告   : 正在使用默认密码 root 且监听所有网卡，公网暴露前请务必改密码")
+    else:
+        print("  密码   : 已关闭（--no-auth）")
     if args.host in ("0.0.0.0", "::"):
         try:
             import socket
