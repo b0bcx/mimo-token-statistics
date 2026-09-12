@@ -1730,7 +1730,7 @@ LOGIN_PAGE = """<!DOCTYPE html>
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "MiMoTokenStats/1.0"
+    server_version = "MiMoTokenStats/1.0.1"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
@@ -1814,6 +1814,42 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body_b)))
                 self.send_header("Set-Cookie", f"{AUTH_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body_b)
+                return
+
+            if path == "/api/password":
+                if not AUTH_ENABLED:
+                    self._json({"ok": False, "error": "鉴权已关闭，无需修改密码"}, 400)
+                    return
+                if not self._require_auth():
+                    self._json({"ok": False, "error": "unauthorized", "login": "/login"}, 401)
+                    return
+                body = self._read_body_json()
+                current = str(body.get("current") or "")
+                nxt = str(body.get("next") or "")
+                if not _password_ok(current):
+                    self._json({"ok": False, "error": "当前密码错误"}, 401)
+                    return
+                if len(nxt) < 4:
+                    self._json({"ok": False, "error": "新密码至少 4 位"}, 400)
+                    return
+                if nxt == current:
+                    self._json({"ok": False, "error": "新密码不能与当前密码相同"}, 400)
+                    return
+
+                global AUTH_PASSWORD
+                AUTH_PASSWORD = nxt
+                # 换发新会话，旧 token 全部失效
+                with _AUTH_LOCK:
+                    _AUTH_TOKENS.clear()
+                tok = issue_token()
+                body_b = json.dumps({"ok": True}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body_b)))
+                self.send_header("Set-Cookie", self._cookie_header(tok))
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(body_b)

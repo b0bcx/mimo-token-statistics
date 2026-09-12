@@ -21,7 +21,7 @@
 - **CSV 导出**、主题默认**跟随系统**（可手动切换并记住）、在线时 15 秒自动刷新（可暂停；快捷键 `R` 立即刷新）
 - 响应式布局：窄屏热力图横向滚动并默认露出最近日期；会话表在手机上隐藏项目列、筛选分行
 - **访问密码**：默认 `root`，支持局域网 / 内网穿透场景
-- 右上角「i」可查看**数据说明**与统计口径
+- 右上角齿轮可打开**设置**（修改访问密码、查看数据说明）
 
 > 术语：界面中的「请求」为带 tokens 的 assistant 消息次数；「次均」= 该范围内总消耗 ÷ 请求次数。
 
@@ -90,8 +90,11 @@ Windows 可双击 `启动统计服务.bat`；结束时可用 `停止统计服务
 - **总消耗** = `input + output + reasoning + cache.read + cache.write`  
   （消息中存在 `tokens.total` 时优先使用该字段）
 - **命中率** = `cache.read / (cache.read + cache.write + input)`
-- **`mimo-auto`** 即桌面端 **Smart / 智能**入口：多数记录里统计的是该**入口 ID**，而不是路由后的具体模型。若服务端回写了实际模型，则以该 `modelID` 计入。
-- **模型 ID** 可能随客户端版本变化。现行客户端中常见 `mimo-flash` / `mimo-pro`；历史数据中仍可见 `mimo-x-flash-preview` / `mimo-x-pro-preview`，新旧 ID 会并列出现在排行中。
+- **`mimo-auto`**：旧版 **mimocode CLI** 的 `mimo-auto` 模型 ID，历史数据中仍可能出现。
+- **模型 ID 说明**（按数据源原样展示，不自动合并）：
+  - `mimo-flash` / `mimo-pro`：桌面端 **Smart** 入口自动路由后的具体模型
+  - `mimo-x-flash-preview` / `mimo-x-pro-preview`：未走 Smart 路由的**常规** flash / pro 模型
+  - 同一批数据里新旧或不同入口 ID 可能并列出现在排行中
 
 ## 数据来源
 
@@ -152,7 +155,7 @@ Windows 可双击 `启动统计服务.bat`；结束时可用 `停止统计服务
 先确认 MiMo Desktop 已登录并产生过会话；或用 `--db` 指定完整路径。
 
 **排行里出现两个很像的模型**  
-官方可能改过模型 `modelID`。例如历史数据里是 `mimo-x-flash-preview` / `mimo-x-pro-preview`，现行客户端常见 `mimo-flash` / `mimo-pro`；`mimo-auto` 则可能是 Smart 入口 ID。服务按数据源原样展示，不会自动合并新旧 ID。
+可能来自不同入口或客户端阶段：`mimo-flash` / `mimo-pro` 是 Smart 自动路由结果；`mimo-x-flash-preview` / `mimo-x-pro-preview` 是常规 flash / pro；`mimo-auto` 是旧版 mimocode CLI 模型。服务按数据源原样展示，不会自动合并。
 
 **「今天」切「全部」有点慢**  
 首次会扫一次库并常驻内存（约 180 秒）；之后各时间范围切换通常只有几十毫秒。可点「刷新」强制重建缓存。

@@ -24,6 +24,20 @@
       : [];
   }
 
+  function readRefreshSec() {
+    const n = Number(localStorage.getItem("mimo-ts-refresh") || 15);
+    return [5, 10, 15, 30, 60].includes(n) ? n : 15;
+  }
+
+  function readShiftMulti() {
+    return localStorage.getItem("mimo-ts-shift-multi") !== "0";
+  }
+
+  function readFollowSystem() {
+    // 默认跟随系统；用户关闭后写 "0"
+    return localStorage.getItem("mimo-ts-follow-system") !== "0";
+  }
+
   function persistDaySelection() {
     if (state.selectedDayDates.length) {
       sessionStorage.setItem("mimo-ts-days", state.selectedDayDates.join(","));
@@ -45,6 +59,9 @@
     data: null,
     sessions: [],
     autoRefresh: true,
+    refreshSec: readRefreshSec(),
+    shiftMulti: readShiftMulti(),
+    followSystem: readFollowSystem(),
     timer: null,
     search: "",
     sort: localStorage.getItem("mimo-ts-sort") || "last",
@@ -55,9 +72,10 @@
     projectLimit: Number(localStorage.getItem("mimo-ts-project-limit") || 5),
     modelSort: localStorage.getItem("mimo-ts-model-sort") || "tokens",
     projectSort: localStorage.getItem("mimo-ts-project-sort") || "tokens",
-    theme: localStorage.getItem("mimo-ts-theme") || systemTheme(),
+    theme: readFollowSystem() ? systemTheme() : (localStorage.getItem("mimo-ts-theme") || systemTheme()),
     selectedDayDates: readStoredDays(),
     selectedHours: readStoredHours(),
+    heatmapWeeks: [],
     hourlyDay: null,
     hourlyReqId: 0,
     hourlySig: "",
@@ -170,19 +188,33 @@
   }
 
   function toggleTheme() {
+    // 跟随系统开启时，手动切换会关闭跟随并记住手动主题
+    if (state.followSystem) {
+      state.followSystem = false;
+      localStorage.setItem("mimo-ts-follow-system", "0");
+      syncSettingsControls();
+    }
     state.theme = state.theme === "light" ? "dark" : "light";
     localStorage.setItem("mimo-ts-theme", state.theme);
     applyTheme();
   }
 
-  // 未手动选择主题时，跟随系统深浅色变化
+  // 主题跟随系统变化
   try {
     window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => {
-      if (localStorage.getItem("mimo-ts-theme")) return;
+      if (!state.followSystem) return;
       state.theme = e.matches ? "dark" : "light";
       applyTheme();
     });
   } catch (_) {}
+
+  // 断点切换（手机横竖屏等）后，按实际格宽重排月份标签
+  window.addEventListener(
+    "resize",
+    debounce(() => {
+      if (state.heatmapWeeks?.length) layoutHeatmapMonths(state.heatmapWeeks);
+    }, 120)
+  );
 
   // ── API ───────────────────────────────────────────────────
   async function fetchJSON(url) {
@@ -357,12 +389,43 @@
     set("#kpi-total", t.fmt || formatTok(t.tokens));
     set("#kpi-total-meta", `${exact(t.tokens)} tokens · 日均 ${t.avg_daily_fmt}`);
     set("#kpi-turns", exact(t.turns));
-    set("#kpi-turns-meta", `${t.sessions || 0} 会话 · ${t.avg_per_turn_fmt}`);
+    set("#kpi-turns-meta", `${t.sessions || 0} 会话 · 次均 ${t.avg_per_turn_fmt}`);
     set("#kpi-cache", (t.cache_hit ?? 0) + "%");
     set("#kpi-cache-meta", `入 ${formatTok(t.input)} · 出 ${formatTok(t.output)} · 缓存 ${formatTok(t.cache)}`);
   }
 
   // ── daily calendar heatmap ────────────────────────────────
+  function layoutHeatmapMonths(weeks) {
+    const el = $("#heatmap-grid");
+    const monthsEl = $("#heatmap-months");
+    if (!el || !monthsEl || !weeks?.length) return;
+    const cs = getComputedStyle(el);
+    const heatGap = parseFloat(cs.columnGap || cs.gap) || 0;
+    const heatCellRaw = cs.gridAutoColumns;
+    const heatCellW =
+      parseFloat(heatCellRaw) ||
+      el.querySelector(".hm-cell")?.getBoundingClientRect().width ||
+      16;
+    const cellPitch = heatCellW + heatGap;
+    const monthNames = ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"];
+    let mHtml = "";
+    let wi = 0;
+    let lastMo = -1;
+    weeks.forEach((week) => {
+      const first = week.find((d) => d);
+      if (first) {
+        const mo = Number(first.date.slice(5, 7)) - 1;
+        if (mo !== lastMo) {
+          lastMo = mo;
+          mHtml += `<span style="left:${wi * cellPitch}px">${monthNames[mo]}</span>`;
+        }
+      }
+      wi += 1;
+    });
+    monthsEl.innerHTML = mHtml;
+    monthsEl.style.width = `${Math.max(0, weeks.length * cellPitch - heatGap)}px`;
+  }
+
   function renderDailyChart(data) {
     const el = $("#heatmap-grid");
     const empty = $("#chart-empty");
@@ -371,14 +434,15 @@
     const hasAny = weeks.some((w) => w.some((d) => d && d.tokens > 0));
     if (!weeks.length || !hasAny) {
       el.innerHTML = "";
+      state.heatmapWeeks = [];
       if (empty) empty.hidden = false;
       return;
     }
     if (empty) empty.hidden = true;
+    state.heatmapWeeks = weeks;
 
     const heatDaysFlat = [];
     let html = "";
-    const cellPitch = 20;
     let lastMonth = -1;
 
     weeks.forEach((week) => {
@@ -403,27 +467,7 @@
       });
     });
     el.innerHTML = html;
-
-    const monthsEl = $("#heatmap-months");
-    if (monthsEl) {
-      const monthNames = ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"];
-      let mHtml = "";
-      let wi = 0;
-      let lastMo = -1;
-      weeks.forEach((week) => {
-        const first = week.find((d) => d);
-        if (first) {
-          const mo = Number(first.date.slice(5, 7)) - 1;
-          if (mo !== lastMo) {
-            lastMo = mo;
-            mHtml += `<span style="left:${wi * cellPitch}px">${monthNames[mo]}</span>`;
-          }
-        }
-        wi += 1;
-      });
-      monthsEl.innerHTML = mHtml;
-      monthsEl.style.width = `${weeks.length * cellPitch}px`;
-    }
+    layoutHeatmapMonths(weeks);
 
     // 窄屏时默认露出最近日期（今天）
     const scrollBox = el.closest(".heatmap-scroll");
@@ -454,7 +498,7 @@
         ev.stopPropagation();
         try { window.getSelection()?.removeAllRanges(); } catch (_) {}
         const list = state.selectedDayDates.slice();
-        if (ev.shiftKey) {
+        if (ev.shiftKey && state.shiftMulti) {
           const idx = list.indexOf(d.date);
           if (idx >= 0) list.splice(idx, 1);
           else list.push(d.date);
@@ -790,7 +834,7 @@
           try { window.getSelection()?.removeAllRanges(); } catch (_) {}
         }
         const list = state.selectedHours.slice();
-        if (ev && ev.shiftKey) {
+        if (ev && ev.shiftKey && state.shiftMulti) {
           const idx = list.indexOf(h);
           if (idx >= 0) list.splice(idx, 1);
           else list.push(h);
@@ -1435,9 +1479,23 @@
         const cache = t.cache_read + t.cache_write;
         kpis.innerHTML = `
           <div class="dk"><div class="l">消耗</div><div class="v">${t.fmt}</div></div>
-          <div class="dk"><div class="l">请求 / 次均</div><div class="v">${exact(nTurns)} 次/${avgFmt}</div></div>
-          <div class="dk"><div class="l">入/出/缓存</div><div class="v" style="font-size:13.5px">${formatTok(t.input)} / ${formatTok(t.output)} / ${formatTok(cache)}</div></div>
-          <div class="dk"><div class="l">命中率</div><div class="v">${t.cache_hit}%</div></div>`;
+          <div class="dk"><div class="l">请求 / 次均</div><div class="v v-sm">${exact(nTurns)} 次/${avgFmt}</div></div>
+          <div class="dk dk-io-desktop"><div class="l">入 / 出 / 缓存</div>
+            <div class="v v-io">
+              <span class="io-item"><em>入</em>${formatTok(t.input)}</span>
+              <span class="io-item"><em>出</em>${formatTok(t.output)}</span>
+              <span class="io-item"><em>缓存</em>${formatTok(cache)}</span>
+            </div>
+          </div>
+          <div class="dk dk-hit-desktop"><div class="l">命中率</div><div class="v">${t.cache_hit}%</div></div>
+          <div class="dk dk-io-mobile"><div class="l">入 / 出 / 缓存 · 命中率</div>
+            <div class="v v-io">
+              <span class="io-item"><em>入</em>${formatTok(t.input)}</span>
+              <span class="io-item"><em>出</em>${formatTok(t.output)}</span>
+              <span class="io-item"><em>缓存</em>${formatTok(cache)}</span>
+              <span class="io-item"><em>命中</em>${t.cache_hit}%</span>
+            </div>
+          </div>`;
       }
       if (models) {
         const ms = d.models || [];
@@ -1590,11 +1648,11 @@
   function startAutoRefresh() {
     stopAutoRefresh();
     if (!state.autoRefresh) return;
-    // 15s — 兼顾新鲜度与 360MB SQLite 扫描成本
+    const ms = Math.max(5, Number(state.refreshSec) || 15) * 1000;
     state.timer = setInterval(() => {
       if (document.hidden) return;
       loadOverview();
-    }, 15000);
+    }, ms);
   }
 
   function stopAutoRefresh() {
@@ -1602,6 +1660,44 @@
       clearInterval(state.timer);
       state.timer = null;
     }
+  }
+
+  function setRefreshInterval(sec) {
+    const n = Number(sec);
+    if (![5, 10, 15, 30, 60].includes(n)) return;
+    state.refreshSec = n;
+    localStorage.setItem("mimo-ts-refresh", String(n));
+    if (state.autoRefresh) startAutoRefresh();
+    const foot = $("#footer-meta");
+    if (foot) foot.textContent = `数据来自本机 mimocode.db · 自动刷新 ${n}s`;
+    const pill = $("#live-pill");
+    if (pill) pill.title = state.autoRefresh ? `在线 · ${n} 秒自动刷新` : "已暂停";
+  }
+
+  function setShiftMulti(on) {
+    state.shiftMulti = !!on;
+    localStorage.setItem("mimo-ts-shift-multi", on ? "1" : "0");
+  }
+
+  function setFollowSystem(on) {
+    state.followSystem = !!on;
+    localStorage.setItem("mimo-ts-follow-system", on ? "1" : "0");
+    if (on) {
+      localStorage.removeItem("mimo-ts-theme");
+      state.theme = systemTheme();
+    } else if (!localStorage.getItem("mimo-ts-theme")) {
+      localStorage.setItem("mimo-ts-theme", state.theme);
+    }
+    applyTheme();
+  }
+
+  function syncSettingsControls() {
+    const refresh = $("#set-refresh");
+    if (refresh) refresh.value = String(state.refreshSec);
+    const shift = $("#set-shift-multi");
+    if (shift) shift.checked = state.shiftMulti;
+    const follow = $("#set-follow-system");
+    if (follow) follow.checked = state.followSystem;
   }
 
   function toggleAutoRefresh() {
@@ -1656,23 +1752,123 @@
 
     $("#btn-theme")?.addEventListener("click", toggleTheme);
 
-    const infoBtn = $("#btn-info");
-    const infoPop = $("#info-pop");
-    const closeInfo = () => {
-      if (infoPop) infoPop.hidden = true;
-      infoBtn?.setAttribute("aria-expanded", "false");
+    const settingsModal = $("#settings-modal");
+    const settingsBackdrop = $("#settings-backdrop");
+    const openSettings = () => {
+      if (!settingsModal || !settingsBackdrop) return;
+      settingsModal.classList.add("open");
+      settingsModal.setAttribute("aria-hidden", "false");
+      settingsBackdrop.hidden = false;
+      const msg = $("#password-msg");
+      if (msg) {
+        msg.textContent = "";
+        msg.className = "settings-msg";
+      }
+      // 默认收起改密区
+      const card = $("#password-card");
+      if (card) card.hidden = true;
+      syncSettingsControls();
     };
-    infoBtn?.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (!infoPop) return;
-      const open = infoPop.hidden;
-      infoPop.hidden = !open;
-      infoBtn.setAttribute("aria-expanded", open ? "true" : "false");
+    const closeSettings = () => {
+      if (!settingsModal || !settingsBackdrop) return;
+      settingsModal.classList.remove("open");
+      settingsModal.setAttribute("aria-hidden", "true");
+      settingsBackdrop.hidden = true;
+    };
+
+    $("#btn-settings")?.addEventListener("click", openSettings);
+    $("#settings-close")?.addEventListener("click", closeSettings);
+    settingsBackdrop?.addEventListener("click", closeSettings);
+
+    $("#set-refresh")?.addEventListener("change", (e) => {
+      setRefreshInterval(e.target.value);
     });
-    document.addEventListener("click", (e) => {
-      if (!infoPop || infoPop.hidden) return;
-      if (!e.target.closest(".info-wrap")) closeInfo();
+    $("#set-shift-multi")?.addEventListener("change", (e) => {
+      setShiftMulti(e.target.checked);
     });
+    $("#set-follow-system")?.addEventListener("change", (e) => {
+      setFollowSystem(e.target.checked);
+    });
+    syncSettingsControls();
+    setRefreshInterval(state.refreshSec); // 同步页脚/标题文案
+
+    $("#password-form")?.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const current = $("#pwd-current")?.value || "";
+      const next = $("#pwd-next")?.value || "";
+      const confirm = $("#pwd-confirm")?.value || "";
+      const msg = $("#password-msg");
+      const btn = $("#password-submit");
+      const setMsg = (text, cls) => {
+        if (!msg) return;
+        msg.textContent = text;
+        msg.className = "settings-msg" + (cls ? " " + cls : "");
+      };
+
+      if (next.length < 4) {
+        setMsg("新密码至少 4 位", "err");
+        return;
+      }
+      if (next !== confirm) {
+        setMsg("两次输入的新密码不一致", "err");
+        return;
+      }
+
+      if (btn) btn.disabled = true;
+      setMsg("保存中…");
+      try {
+        const res = await fetch("/api/password", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ current, next }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 401) {
+          setMsg(data.error || "当前密码错误", "err");
+        } else if (!res.ok || !data.ok) {
+          setMsg(data.error || "保存失败", "err");
+        } else {
+          setMsg("密码已更新", "ok");
+          $("#pwd-current").value = "";
+          $("#pwd-next").value = "";
+          $("#pwd-confirm").value = "";
+        }
+      } catch (err) {
+        setMsg("保存失败：" + err.message, "err");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    });
+
+    $("#btn-logout")?.addEventListener("click", async () => {
+      const btn = $("#btn-logout");
+      if (btn) btn.disabled = true;
+      try {
+        await fetch("/api/logout", { method: "POST", credentials: "same-origin" });
+      } catch (_) {}
+      location.href = "/login";
+    });
+
+    $("#btn-goto-password")?.addEventListener("click", () => {
+      const card = $("#password-card");
+      if (card) card.hidden = false;
+      $("#pwd-current")?.focus();
+      card?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+
+    $("#btn-cancel-password")?.addEventListener("click", () => {
+      const card = $("#password-card");
+      if (card) card.hidden = true;
+      const form = $("#password-form");
+      form?.reset();
+      const msg = $("#password-msg");
+      if (msg) {
+        msg.textContent = "";
+        msg.className = "settings-msg";
+      }
+    });
+
     $("#live-pill")?.addEventListener("click", toggleAutoRefresh);
     $("#drawer-close")?.addEventListener("click", closeDrawer);
     $("#drawer-backdrop")?.addEventListener("click", closeDrawer);
@@ -1750,12 +1946,14 @@
     });
 
     document.addEventListener("keydown", (e) => {
-      if (e.target.matches("input, textarea, select")) return;
       if (e.key === "Escape") {
-        if (infoPop && !infoPop.hidden) {
-          closeInfo();
+        if ($("#settings-modal")?.classList.contains("open")) {
+          closeSettings();
           return;
         }
+      }
+      if (e.target.matches("input, textarea, select")) return;
+      if (e.key === "Escape") {
         if ($("#drawer")?.classList.contains("open")) closeDrawer();
         else if (state.openModel || state.openProject) {
           setOpenModel(null);
